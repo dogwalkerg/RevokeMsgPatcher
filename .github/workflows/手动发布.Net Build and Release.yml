@@ -1,0 +1,169 @@
+name: 手动发布.Net Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      Version:
+        description: 'Version number (e.g., 2.1.0)'
+        required: true
+        default: '1.0.0'
+      Reason:
+        description: 'Reasons for building this version'
+        required: false
+        default: 'Manual release build'
+  push:
+    tags:
+      - 'v*'  # 推送标签时自动创建 Release
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+      - .editorconfig
+      - appveyor.yml
+
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+      - .editorconfig
+      - appveyor.yml
+
+jobs:
+  build:
+    name: Build Release Version
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore
+
+      - name: Build Solution (Release)
+        run: msbuild /m /p:Configuration=Release
+
+      - name: List Assistant build output
+        run: |
+          echo "Checking RevokeMsgPatcher.Assistant build output:"
+          dir ".\RevokeMsgPatcher.Assistant\bin\Release" /b
+        shell: cmd
+
+      - name: Upload Assistant Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RevokeMsgPatcher-Assistant-Release
+          path: |
+            RevokeMsgPatcher.Assistant/bin/Release/
+            !**/*.config
+            !**/*.pdb
+          if-no-files-found: error
+
+  create-release:
+    name: Create Release
+    needs: build
+    # 手动触发或标签推送时都创建 Release
+    if: success() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Assistant Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RevokeMsgPatcher-Assistant-Release
+          path: ./assistant-files
+
+      - name: List downloaded Assistant files
+        run: |
+          echo "Contents of assistant-files directory:"
+          dir .\assistant-files /s /b
+        shell: cmd
+
+      - name: Determine Version
+        id: version
+        run: |
+          # 如果是手动触发，使用输入的版本号；如果是标签触发，使用标签名
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.Version }}"
+          } else {
+            $version = "${{ github.ref_name }}".Replace('v', '')
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Using version: $version"
+        shell: pwsh
+
+      - name: Create ZIP Archive
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zipFileName = "RevokeMsgPatcher.v$version.zip"
+          echo "Creating ZIP for version: $version"
+          echo "ZIP file name: $zipFileName"
+          
+          # 只打包 Assistant 目录中的文件
+          Compress-Archive -Path ".\assistant-files\*" -DestinationPath $zipFileName -Force
+          echo "ZIP file created: $zipFileName"
+          
+          # 验证ZIP文件
+          if (Test-Path $zipFileName) {
+            $fileSize = (Get-Item $zipFileName).Length
+            echo "ZIP file exists, size: $fileSize bytes"
+            
+            # 列出ZIP文件内容
+            echo "Contents of ZIP file:"
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($zipFileName)
+            $zip.Entries | ForEach-Object { echo $_.FullName }
+            $zip.Dispose()
+          } else {
+            echo "ERROR: ZIP file was not created!"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Determine Release Name and Tag
+        id: release_info
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tagName = "v${{ steps.version.outputs.version }}"
+            $releaseName = "Release v${{ steps.version.outputs.version }}"
+          } else {
+            $tagName = "${{ github.ref_name }}"
+            $releaseName = "Release ${{ github.ref_name }}"
+          }
+          echo "tag_name=$tagName" >> $env:GITHUB_OUTPUT
+          echo "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          echo "Using tag: $tagName"
+          echo "Using release name: $releaseName"
+        shell: pwsh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          body: |
+            ${{ github.event.inputs.Reason }}
+            
+            **Build Information:**
+            - Version: ${{ steps.version.outputs.version }}
+            - Build Number: ${{ github.run_number }}
+            - Commit: ${{ github.sha }}
+            - Triggered by: ${{ github.event_name }}
+            
+            **Included Files:**
+            - RevokeMsgPatcher.Assistant.exe
+            - RevokeMsgPatcher.exe
+            - Newtonsoft.Json.dll
+            - Newtonsoft.Json.xml
+          draft: false
+          prerelease: false
+          files: |
+            RevokeMsgPatcher.v*.zip
