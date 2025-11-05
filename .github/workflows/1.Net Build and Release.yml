@@ -1,4 +1,3 @@
-# 为了清晰起见，我们只展示需要修改和新增的部分
 name: 1.Net Build and Release
 
 on:
@@ -9,9 +8,8 @@ on:
         required: true
         default: 'No reason. Just do it.'
   push:
-    # 通常只在打版本标签时创建 Release
     tags:
-      - 'v*' # 当推送 v 开头的标签时触发，例如 v2.1
+      - 'v*'
     branches:
       - master
     paths-ignore:
@@ -19,7 +17,15 @@ on:
       - .gitignore
       - .editorconfig
       - appveyor.yml
-  # 建议为 Release 构建移除 pull_request 触发器，或确保其不会创建 Release
+
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+      - .editorconfig
+      - appveyor.yml
 
 jobs:
   build:
@@ -28,26 +34,51 @@ jobs:
     strategy:
       matrix:
         BUILD_CONFIGURATION: [Debug, Release]
+    
     steps:
-      # ... 前面的步骤（检出代码、安装MSBuild、恢复NuGet、构建）保持不变 ...
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore
+
+      - name: Build Solution
+        run: msbuild /m /p:Configuration=${{ matrix.BUILD_CONFIGURATION }}
+
+      # 添加诊断步骤：列出构建输出目录
+      - name: List build output directories
+        run: |
+          echo "Checking build output directories..."
+          dir .\ /s /b | findstr "bin.*${{ matrix.BUILD_CONFIGURATION }}" || echo "No build output found"
+          echo "Checking RevokeMsgPatcher directory..."
+          if exist ".\RevokeMsgPatcher" (
+            dir ".\RevokeMsgPatcher" /s
+          ) else (
+            echo "RevokeMsgPatcher directory not found"
+          )
+        shell: cmd
+
+      # 修正上传步骤：使用更通用的路径模式
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RevokeMsgPatcher-${{ matrix.BUILD_CONFIGURATION }}
           path: |
-            .\RevokeMsgPatcher\bin\${{ matrix.BUILD_CONFIGURATION }}\
-            # 注意：这里可以根据需要调整具体要打包的文件路径
-            # 确保路径指向构建输出的正确位置
+            **/bin/${{ matrix.BUILD_CONFIGURATION }}/**
+            !**/*.config
+            !**/*.pdb
+          if-no-files-found: error
 
-  # 新增一个专门用于创建 Release 的 Job
   create-release:
     name: Create Release
-    # 这个 Job 仅在构建 Job 成功，且是由标签触发时运行
     needs: build
     if: success() && startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     permissions:
-      contents: write # 这是创建 Release 所必需的新权限
+      contents: write
 
     steps:
       - name: Checkout code
@@ -56,22 +87,42 @@ jobs:
       - name: Download Release Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: RevokeMsgPatcher-Release # 只下载 Release 版本的构件
+          name: RevokeMsgPatcher-Release
           path: ./release-assets
 
-      - name: List downloaded files
-        run: dir .\release-assets /B
+      - name: List downloaded files for debugging
+        run: |
+          echo "Contents of release-assets directory:"
+          dir .\release-assets /s /b
         shell: cmd
+
+      - name: Create ZIP Archive
+        run: |
+          $version = "${{ github.ref_name }}".Replace('v', '')
+          echo "Creating ZIP archive for version: $version"
+          
+          # 查找主要的可执行文件
+          $exeFiles = Get-ChildItem -Path ".\release-assets" -Recurse -Filter "*.exe" | Where-Object { $_.Name -notlike "*Test*" -and $_.Name -notlike "*test*" }
+          $dllFiles = Get-ChildItem -Path ".\release-assets" -Recurse -Filter "*.dll" | Where-Object { $_.Name -notlike "*Test*" -and $_.Name -notlike "*test*" }
+          
+          echo "Found EXE files:"
+          $exeFiles | ForEach-Object { echo $_.FullName }
+          
+          echo "Found DLL files:"
+          $dllFiles | ForEach-Object { echo $_.FullName }
+          
+          # 创建ZIP文件
+          $zipPath = "RevokeMsgPatcher.v$version.zip"
+          Compress-Archive -Path ".\release-assets\*" -DestinationPath $zipPath -Force
+          
+          echo "Created ZIP file: $zipPath"
+        shell: pwsh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }} # 使用触发工作流的标签
+          tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          # body: 这里可以写一些发布说明，可以从文件读取或直接填写
-          generate_release_notes: true # 让 GitHub 自动生成发布说明
+          generate_release_notes: true
           files: |
-            ./release-assets/**/*.exe
-            ./release-assets/**/*.dll
-            # 您可以在这里添加其他需要包含在 Release 中的文件模式
-            # 例如，创建一个 ZIP 包
+            RevokeMsgPatcher.v*.zip
