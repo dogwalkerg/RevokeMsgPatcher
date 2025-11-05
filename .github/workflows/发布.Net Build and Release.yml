@@ -1,0 +1,124 @@
+name: 发布.Net Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      Reason:
+        description: 'Reasons for temporary build'
+        required: true
+        default: 'No reason. Just do it.'
+  push:
+    tags:
+      - 'v*'  # 只有推送标签时才创建 Release
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+      - .editorconfig
+      - appveyor.yml
+
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+      - .editorconfig
+      - appveyor.yml
+
+jobs:
+  build:
+    name: Build (${{ matrix.BUILD_CONFIGURATION }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        BUILD_CONFIGURATION: [Debug, Release]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore
+
+      - name: Build Solution
+        run: msbuild /m /p:Configuration=${{ matrix.BUILD_CONFIGURATION }}
+
+      - name: List Assistant build output
+        run: |
+          echo "Checking RevokeMsgPatcher.Assistant build output:"
+          dir ".\RevokeMsgPatcher.Assistant\bin\${{ matrix.BUILD_CONFIGURATION }}" /b
+        shell: cmd
+
+      - name: Upload Assistant Artifact
+        if: matrix.BUILD_CONFIGURATION == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RevokeMsgPatcher-Assistant-Release
+          path: |
+            RevokeMsgPatcher.Assistant/bin/Release/
+            !**/*.config
+            !**/*.pdb
+          if-no-files-found: error
+
+  create-release:
+    name: Create Release
+    needs: build
+    if: success() && startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Assistant Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RevokeMsgPatcher-Assistant-Release
+          path: ./assistant-files
+
+      - name: List downloaded Assistant files
+        run: |
+          echo "Contents of assistant-files directory:"
+          dir .\assistant-files /s /b
+        shell: cmd
+
+      - name: Create ZIP Archive
+        run: |
+          $version = "${{ github.ref_name }}".Replace('v', '')
+          $zipFileName = "RevokeMsgPatcher.v$version.zip"
+          echo "Creating ZIP for version: $version"
+          echo "ZIP file name: $zipFileName"
+          
+          # 只打包 Assistant 目录中的文件
+          Compress-Archive -Path ".\assistant-files\*" -DestinationPath $zipFileName -Force
+          echo "ZIP file created: $zipFileName"
+          
+          # 验证ZIP文件
+          if (Test-Path $zipFileName) {
+            $fileSize = (Get-Item $zipFileName).Length
+            echo "ZIP file exists, size: $fileSize bytes"
+            
+            # 列出ZIP文件内容
+            echo "Contents of ZIP file:"
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($zipFileName)
+            $zip.Entries | ForEach-Object { echo $_.FullName }
+            $zip.Dispose()
+          } else {
+            echo "ERROR: ZIP file was not created!"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            RevokeMsgPatcher.v*.zip
