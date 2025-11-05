@@ -58,14 +58,13 @@ jobs:
             !**/*.pdb
           if-no-files-found: error
 
-  # 新增：创建 Release 的 Job
   create-release:
     name: Create Release
     needs: build
     if: success() && startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     permissions:
-      contents: write  # 必需权限
+      contents: write
 
     steps:
       - name: Download Release Artifact
@@ -74,20 +73,37 @@ jobs:
           name: RevokeMsgPatcher-Release
           path: ./release-files
 
+      - name: List downloaded files
+        run: |
+          echo "Contents of release-files directory:"
+          dir .\release-files /s /b
+        shell: cmd
+
       - name: Create ZIP Archive
         run: |
           $version = "${{ github.ref_name }}".Replace('v', '')
+          $zipFileName = "RevokeMsgPatcher.v$version.zip"
           echo "Creating ZIP for version: $version"
+          echo "ZIP file name: $zipFileName"
           
           # 创建包含所有文件的ZIP
-          Compress-Archive -Path ".\release-files\*" -DestinationPath "RevokeMsgPatcher.v$version.zip" -Force
-          echo "ZIP file created: RevokeMsgPatcher.v$version.zip"
+          Compress-Archive -Path ".\release-files\*" -DestinationPath $zipFileName -Force
+          echo "ZIP file created: $zipFileName"
           
-          # 列出ZIP内容用于调试
-          if (Test-Path "RevokeMsgPatcher.v$version.zip") {
-            echo "ZIP file exists, size: $( (Get-Item 'RevokeMsgPatcher.v$version.zip').Length ) bytes"
+          # 验证ZIP文件
+          if (Test-Path $zipFileName) {
+            $fileSize = (Get-Item $zipFileName).Length
+            echo "ZIP file exists, size: $fileSize bytes"
+            
+            # 列出ZIP文件内容
+            echo "Contents of ZIP file:"
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($zipFileName)
+            $zip.Entries | ForEach-Object { echo $_.FullName }
+            $zip.Dispose()
           } else {
             echo "ERROR: ZIP file was not created!"
+            exit 1
           }
         shell: pwsh
 
@@ -96,20 +112,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          body: |
-            Automated release from GitHub Actions
-            
-            **Build Information:**
-            - Build Number: ${{ github.run_number }}
-            - Commit: ${{ github.sha }}
-            - Triggered by: ${{ github.event_name }}
-            
-            **Included Applications:**
-            - RevokeMsgPatcher.exe
-            - RevokeMsgPatcher.Launcher.exe  
-            - RevokeMsgPatcher.MultiInstance.exe
-            - RevokeMsgPatcher.Assistant.exe
-          draft: false
-          prerelease: false
+          generate_release_notes: true
           files: |
             RevokeMsgPatcher.v*.zip
