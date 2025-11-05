@@ -9,7 +9,7 @@ on:
         default: 'No reason. Just do it.'
   push:
     tags:
-      - 'v*'
+      - 'v*'  # 只有推送标签时才创建 Release
     branches:
       - master
     paths-ignore:
@@ -48,20 +48,6 @@ jobs:
       - name: Build Solution
         run: msbuild /m /p:Configuration=${{ matrix.BUILD_CONFIGURATION }}
 
-      # 添加诊断步骤：列出构建输出目录
-      - name: List build output directories
-        run: |
-          echo "Checking build output directories..."
-          dir .\ /s /b | findstr "bin.*${{ matrix.BUILD_CONFIGURATION }}" || echo "No build output found"
-          echo "Checking RevokeMsgPatcher directory..."
-          if exist ".\RevokeMsgPatcher" (
-            dir ".\RevokeMsgPatcher" /s
-          ) else (
-            echo "RevokeMsgPatcher directory not found"
-          )
-        shell: cmd
-
-      # 修正上传步骤：使用更通用的路径模式
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -72,50 +58,37 @@ jobs:
             !**/*.pdb
           if-no-files-found: error
 
+  # 新增：创建 Release 的 Job
   create-release:
     name: Create Release
     needs: build
     if: success() && startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: write  # 必需权限
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download Release Build Artifact
+      - name: Download Release Artifact
         uses: actions/download-artifact@v4
         with:
           name: RevokeMsgPatcher-Release
-          path: ./release-assets
-
-      - name: List downloaded files for debugging
-        run: |
-          echo "Contents of release-assets directory:"
-          dir .\release-assets /s /b
-        shell: cmd
+          path: ./release-files
 
       - name: Create ZIP Archive
         run: |
           $version = "${{ github.ref_name }}".Replace('v', '')
-          echo "Creating ZIP archive for version: $version"
+          echo "Creating ZIP for version: $version"
           
-          # 查找主要的可执行文件
-          $exeFiles = Get-ChildItem -Path ".\release-assets" -Recurse -Filter "*.exe" | Where-Object { $_.Name -notlike "*Test*" -and $_.Name -notlike "*test*" }
-          $dllFiles = Get-ChildItem -Path ".\release-assets" -Recurse -Filter "*.dll" | Where-Object { $_.Name -notlike "*Test*" -and $_.Name -notlike "*test*" }
+          # 创建包含所有文件的ZIP
+          Compress-Archive -Path ".\release-files\*" -DestinationPath "RevokeMsgPatcher.v$version.zip" -Force
+          echo "ZIP file created: RevokeMsgPatcher.v$version.zip"
           
-          echo "Found EXE files:"
-          $exeFiles | ForEach-Object { echo $_.FullName }
-          
-          echo "Found DLL files:"
-          $dllFiles | ForEach-Object { echo $_.FullName }
-          
-          # 创建ZIP文件
-          $zipPath = "RevokeMsgPatcher.v$version.zip"
-          Compress-Archive -Path ".\release-assets\*" -DestinationPath $zipPath -Force
-          
-          echo "Created ZIP file: $zipPath"
+          # 列出ZIP内容用于调试
+          if (Test-Path "RevokeMsgPatcher.v$version.zip") {
+            echo "ZIP file exists, size: $( (Get-Item 'RevokeMsgPatcher.v$version.zip').Length ) bytes"
+          } else {
+            echo "ERROR: ZIP file was not created!"
+          }
         shell: pwsh
 
       - name: Create GitHub Release
@@ -123,6 +96,20 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          generate_release_notes: true
+          body: |
+            Automated release from GitHub Actions
+            
+            **Build Information:**
+            - Build Number: ${{ github.run_number }}
+            - Commit: ${{ github.sha }}
+            - Triggered by: ${{ github.event_name }}
+            
+            **Included Applications:**
+            - RevokeMsgPatcher.exe
+            - RevokeMsgPatcher.Launcher.exe  
+            - RevokeMsgPatcher.MultiInstance.exe
+            - RevokeMsgPatcher.Assistant.exe
+          draft: false
+          prerelease: false
           files: |
             RevokeMsgPatcher.v*.zip
